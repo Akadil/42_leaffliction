@@ -14,7 +14,7 @@ source .venv/bin/activate
 Install the dependencies if the environment is not ready yet:
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 Once the virtual environment is active, the scripts can be executed directly:
