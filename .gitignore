@@ -1,2 +1,6 @@
-dataset/
-.venv
+Apple/
+Grape/
+images/
+augmented_directory/
+__pycache__/
+*.pyc
