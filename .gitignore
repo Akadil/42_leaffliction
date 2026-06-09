@@ -4,3 +4,6 @@ images/
 augmented_directory/
 __pycache__/
 *.pyc
+
+dataset/
+.venv
