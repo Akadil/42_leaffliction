@@ -4,6 +4,7 @@ import zipfile
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
+import random
 
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -15,33 +16,60 @@ LEARNING_RATE_FROZEN = 1e-3
 LEARNING_RATE_UNFROZEN = 1e-5
 VALIDATION_SPLIT = 0.2
 AUTOTUNE = tf.data.AUTOTUNE
+random.seed(42)
 
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
-def load_dataset(root_dir: Path) -> tuple[tf.data.Dataset, tf.data.Dataset, list[str]]:
-    train_ds = tf.keras.utils.image_dataset_from_directory(
-        root_dir,
-        validation_split=VALIDATION_SPLIT,
-        subset="training",
-        seed=42,
-        image_size=IMAGE_SIZE,
-        batch_size=BATCH_SIZE,
-        label_mode="categorical",
-    )
-    val_ds = tf.keras.utils.image_dataset_from_directory(
-        root_dir,
-        validation_split=VALIDATION_SPLIT,
-        subset="validation",
-        seed=42,
-        image_size=IMAGE_SIZE,
-        batch_size=BATCH_SIZE,
-        label_mode="categorical",
-    )
-    class_names = train_ds.class_names
-    train_ds = train_ds.prefetch(AUTOTUNE)
-    val_ds = val_ds.prefetch(AUTOTUNE)
-    return train_ds, val_ds, class_names
+def _split_and_oversample(
+    root_dir: Path,
+) -> tuple[list[Path], list[int], list[Path], list[int], list[str]]:
+    class_names = sorted([d.name for d in root_dir.iterdir() if d.is_dir()])
+    train_files, train_labels, val_files, val_labels = [], [], [], []
 
+    for idx, cls in enumerate(class_names):
+        files = sorted((root_dir / cls).glob("*.[Jj][Pp][Gg]"))
+        random.shuffle(files)
+        split = int(len(files) * (1 - VALIDATION_SPLIT))
+        train_files += files[:split]
+        train_labels += [idx] * split
+        val_files += files[split:]
+        val_labels += [idx] * (len(files) - split)
+
+    max_count = max(train_labels.count(i) for i in range(len(class_names)))
+    for idx in range(len(class_names)):
+        needed = max_count - train_labels.count(idx)
+        if needed > 0:
+            cls_files = [f for f, l in zip(train_files, train_labels) if l == idx]
+            train_files += random.choices(cls_files, k=needed)
+            train_labels += [idx] * needed
+
+    return train_files, train_labels, val_files, val_labels, class_names
+
+
+def load_dataset(root_dir: Path) -> tuple[tf.data.Dataset, tf.data.Dataset, list[str]]:
+    train_files, train_labels, val_files, val_labels, class_names = _split_and_oversample(root_dir)
+
+    def parse_image(path, label):
+        img = tf.io.read_file(path)
+        img = tf.image.decode_jpeg(img, channels=3)
+        img = tf.image.resize(img, IMAGE_SIZE)
+        return img, tf.one_hot(label, len(class_names))
+
+    train_ds = (
+        tf.data.Dataset.from_tensor_slices(([str(f) for f in train_files], train_labels))
+        .map(parse_image, num_parallel_calls=AUTOTUNE)
+        .shuffle(buffer_size=len(train_files))
+        .batch(BATCH_SIZE)
+        .prefetch(AUTOTUNE)
+    )
+    val_ds = (
+        tf.data.Dataset.from_tensor_slices(([str(f) for f in val_files], val_labels))
+        .map(parse_image, num_parallel_calls=AUTOTUNE)
+        .batch(BATCH_SIZE)
+        .prefetch(AUTOTUNE)
+    )
+
+    return train_ds, val_ds, class_names
 
 # ── Augmentation layer ────────────────────────────────────────────────────────
 def build_augmentation_layer() -> tf.keras.Sequential:
@@ -97,8 +125,9 @@ def train_frozen(model: tf.keras.Model, train_ds, val_ds) -> tf.keras.callbacks.
 
 def train_unfrozen(model: tf.keras.Model, train_ds, val_ds) -> tf.keras.callbacks.History:
     # Unfreeze top 20 layers of backbone
-    model.layers[3].trainable = True
-    for layer in model.layers[3].layers[:-20]:
+    base_model = model.get_layer("efficientnetb0")
+    base_model.trainable = True
+    for layer in base_model.layers[:-20]:
         layer.trainable = False
 
     model.compile(
@@ -132,7 +161,6 @@ def save_artifacts(model: tf.keras.Model, class_names: list[str], root_dir: Path
         zf.write("best_model.keras")
         zf.write("class_names.txt")
     print(f"Artifacts saved to {zip_path}")
-
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
